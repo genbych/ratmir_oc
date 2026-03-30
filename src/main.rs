@@ -3,11 +3,12 @@
 
 use core::panic::PanicInfo;
 use uefi::prelude::*;
-use uefi::println;
+use uefi::{println, Char16};
 use uefi::proto::console::gop::GraphicsOutput;
 use uefi::table::boot::MemoryType;
 use core::fmt;
 use core::fmt::Write;
+use uefi::proto::console::text::{Key, ScanCode};
 
 struct Display {
     ptr: *mut u32,
@@ -21,6 +22,7 @@ struct Console<'a> {
     grid: TextGrid,
     cursor_x: usize,
     cursor_y: usize,
+    line_lengths: [usize; 256],
     foreground: u32,
     background: u32,
 }
@@ -82,28 +84,63 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
         grid: grid,
         cursor_x: 0,
         cursor_y: 0,
+        line_lengths: [0; 256],
         foreground: 0xFFFFFFFF,
         background: 0x00000000,
 
     };
 
     memory_size /= 2_u64.pow(20);
-
     display.rect(0, 0, display.width, display.height, 0x00000000);
-    write!(console, "Welcome to RatmirOC\nMemory available: {} MB", memory_size).expect("error to write");
+    let space_key = Char16::try_from('\r').unwrap();
+    let backspace_key = Char16::try_from('\u{8}').unwrap();
+
+    for i in 0..200 {
+        write!(&mut console, "Scrolling line {}\n", i).unwrap();
+    }
 
 
+    loop {
 
-    let key_event = st
-        .stdin()
-        .wait_for_key_event()
-        .expect("Keyboard event not available");
+        let line_heights = console.line_lengths;
 
-    st.boot_services()
-        .wait_for_event(&mut [key_event])
-        .discard_errdata();
 
+        let key_event = st
+            .stdin()
+            .wait_for_key_event()
+            .expect("Keyboard event not available");
+
+        st.boot_services()
+            .wait_for_event(&mut [key_event])
+            .discard_errdata();
+
+
+        if let Some(key_event) = st.stdin().read_key().unwrap() {
+            match key_event {
+                Key::Printable(key) if key == space_key => {
+                    console.write_char('\n');
+                }
+
+                Key::Printable(key) if key == backspace_key => {
+                    console.backspace();
+                }
+
+                Key::Printable(c) => {
+                    let ch: char = c.into();
+                    console.write_char(ch);
+                }
+
+                Key::Special(ScanCode::ESCAPE) => {
+                    break;
+                }
+
+
+                _ => {}
+            }
+        }
+    }
     Status::SUCCESS
+
 }
 
 
@@ -138,19 +175,64 @@ impl Display {
 }
 
 impl<'a> Console<'a> {
+
+    fn scroll(&mut self) {
+        let row_size_in_pixels = self.display.stride * 16;
+
+        unsafe {
+            let dst = self.display.ptr;
+            let src = self.display.ptr.add(row_size_in_pixels);
+
+            let count = self.display.stride * (self.display.height - 16);
+
+            core::ptr::copy(src, dst, count);
+        }
+
+        for i in 0..(self.grid.rows - 1) {
+            self.line_lengths[i] = self.line_lengths[i + 1];
+        }
+
+        self.line_lengths[self.grid.rows - 1] = 0;
+
+        self.display.rect(0, self.display.height - 16, self.display.width, 16, 0x00000000);
+    }
+
+    fn check_scroll(&mut self) {
+        if self.cursor_y >= self.grid.rows {
+            self.scroll();
+            self.cursor_y = self.grid.rows - 1;
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_x > 0 {
+            self.cursor_x -= 1;
+        }
+        else if self.cursor_y > 0 {
+            self.cursor_y -= 1;
+            self.cursor_x = self.line_lengths[self.cursor_y];
+        }
+        else {
+            return;
+        }
+
+        let x = self.cursor_x * 8;
+        let y = self.cursor_y * 16;
+
+        self.display.rect(x, y, 8, 16, self.background);
+    }
+
     fn write_char(&mut self, c: char) {
 
         match c {
             '\n' => {
+                self.line_lengths[self.cursor_y] = self.cursor_x;
                 self.cursor_x = 0;
                 self.cursor_y += 1;
+                self.check_scroll();
                 return;
             }
 
-            '\r' => {
-                self.cursor_x = 0;
-                return;
-            }
             _ => {}
         }
 
@@ -176,6 +258,8 @@ impl<'a> Console<'a> {
         }
 
         self.cursor_x += 1;
+
+        self.line_lengths[self.cursor_y] = self.cursor_x;
 
         if self.cursor_x > self.grid.cols {
             self.cursor_x = 0;
