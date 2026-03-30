@@ -8,6 +8,12 @@ use uefi::println;
 use uefi::table::boot::{ MemoryType };
 use uefi::proto::console::gop::GraphicsOutput;
 
+struct Display {
+    ptr: *mut u32,
+    width: usize,
+    height: usize,
+    stride: usize,
+}
 
 #[entry]
 fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status{
@@ -42,11 +48,14 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status{
 
     st.stdin().reset(false).unwrap();
 
-    unsafe {
-        for i in 0..(resolution.0 * resolution.1) as usize {
-            ptr.add(i).write_volatile(0x00FF00FF);
-        }
-    }
+    let display = Display {
+        ptr: ptr,
+        width: resolution.0,
+        height: resolution.1,
+        stride: stride,
+    };
+
+    rect(&display, 100, 100, 100, 10000, 0x00FF00FF);
 
     let key_event = st.stdin().wait_for_key_event().expect("Keyboard event not available");
 
@@ -60,7 +69,34 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status{
     Status::SUCCESS
 }
 
+fn draw_pixel(display:  &Display, x: usize, y: usize, color: u32) {
+    unsafe {
+        if x > display.width || y > display.height {
+            return;
+        }
+
+        display.ptr.add(y * display.stride + x).write_volatile(color);
+    }
+}
+
+fn rect(display: &Display, x: usize, y: usize, mut w: usize, mut h: usize, color: u32) {
+
+    if x.checked_add(w).expect("overflow") > display.width {
+        w = display.width - x;
+    }
+    if y.checked_add(h).expect("overflow") > display.height {
+        h = display.height - y;
+    }
+
+    for i in x..x.checked_add(w).expect("overflow") {
+        for j in y..y.checked_add(h).expect("overflow") {
+            draw_pixel(display, i, j, color)
+        }
+    }
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
+
