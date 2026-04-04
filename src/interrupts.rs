@@ -30,6 +30,26 @@ pub struct Idtr {
     base: u64,
 }
 
+pub unsafe fn outb(port: u16, val: u8) {
+    core::arch::asm!(
+    "out dx, al",
+    in("dx") port,
+    in("al") val,
+    options(nomem, nostack, preserves_flags)
+    );
+}
+
+pub unsafe fn inb(port: u16) -> u8 {
+    let res: u8;
+    core::arch::asm!(
+    "in al, dx",
+    out("al") res,
+    in("dx") port,
+    options(nomem, nostack, preserves_flags)
+    );
+    res
+}
+
 impl Idtr {
     pub fn new(idt_ptr: *const Idt) -> Self {
         Self {
@@ -59,11 +79,18 @@ impl Idt {
     }
 
     pub fn init(&mut self) {
+
+        for i in 0..=255 {
+            self.set_handles(i, double_fault as u64);
+        }
+
         self.set_handles(0, divide_error as u64);
         self.set_handles(1, debug_handler as u64);
         self.set_handles(8, double_fault as u64);
         self.set_handles(13, general_protection_fault as u64);
         self.set_handles(14, page_fault as u64);
+        self.set_handles(32, timer_handler as u64);
+        self.set_handles(33, keyboard_fault as u64);
     }
 
     pub fn set_handles(&mut self, index: u8, handler: u64) {
@@ -120,6 +147,13 @@ extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: u64
 
     loop {}
 }
+
+extern "x86-interrupt" fn timer_handler(frame: InterruptStackFrame,) {
+
+    unsafe { outb(0x20, 0x20) }
+}
+
+
 extern "x86-interrupt" fn debug_handler(frame: InterruptStackFrame) {
     unsafe {
         if let Some(ref d) = PANIC_DISPLAY {

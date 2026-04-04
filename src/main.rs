@@ -5,6 +5,7 @@
 mod display;
 mod console;
 mod interrupts;
+mod keyboard;
 
 use core::panic::PanicInfo;
 use uefi::prelude::*;
@@ -47,6 +48,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
         let mut gop = bs
             .open_protocol_exclusive::<GraphicsOutput>(gop_handle)
             .expect("Failed to open GOP");
+
 
         let mut fb = gop.frame_buffer();
         let ptr = fb.as_mut_ptr() as *mut u32;
@@ -92,8 +94,17 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     
     unsafe {
         MY_IDT.init();
+        display.rect(0, 0, 100, 100, 0xFF0000);
+
+        unsafe {
+            core::arch::asm!("cli"); // Вырубаем всё
+            load_idt(&MY_IDT);
+        }
         load_idt(&MY_IDT);
+        display.rect(100, 0, 100, 100, 0x00FF00);
     }
+
+
 
     let grid = TextGrid {
         rows: resolution.1 / 16 ,
@@ -121,10 +132,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     for i in 0..200 {
         write!(&mut console, "Scrolling line {}\n", i).unwrap();
     }
-
-    let mut zero = 0;
-    unsafe { core::ptr::read_volatile(&zero); }
-    let _ = 1 / zero;
+    
 
     loop {
 
@@ -140,6 +148,8 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
             .wait_for_event(&mut [key_event])
             .discard_errdata();
 
+
+        display.rect(200, 0, 100, 100, 0x0000FF);
 
         if let Some(key_event) = st.stdin().read_key().unwrap() {
             match key_event {
