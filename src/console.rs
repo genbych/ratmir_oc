@@ -1,5 +1,6 @@
 use core::fmt;
 use crate::display::{get_char_data, Display};
+use crate::interrupts::kernel_panic;
 
 pub struct TextGrid {
     pub rows: usize,
@@ -15,6 +16,54 @@ pub struct Console<'a> {
     pub foreground: u32,
     pub background: u32,
 }
+pub struct Stack<T, const N: usize> {
+    data: [T; N],
+    top: usize,
+}
+
+#[derive(Copy, Clone)]
+pub struct Buffer<const N: usize> {
+    data: [Option<char>; N],
+}
+
+impl<const N: usize> Buffer<N> {
+    pub const fn new() -> Self {
+        Self { data: [None; N] }
+    }
+}
+
+pub static BUFFER: Buffer::<256> = Buffer::<256>::new();
+pub static STACK: Stack::<Buffer<256>, 256> = Stack {
+    data: [BUFFER; 256],
+    top: 0,
+};
+
+
+impl<T: Copy + Default, const N: usize> Stack<T, N> {
+    pub fn new() -> Stack<T, N> {
+        Self { data: [T::default(); N], top: 0 }
+    }
+
+    pub fn push(&mut self, data: T) {
+        if self.top < N {
+            self.data[self.top] = data;
+            self.top += 1;
+        }
+        else {
+            kernel_panic("Stack Overflow");
+        }
+    }
+    pub fn pop(&mut self) -> Option<T> {
+        if self.top > 0 {
+            self.top -= 1;
+            Some(self.data[self.top])
+        }
+        else {
+            None
+        }
+    }
+}
+
 impl<'a> Console<'a> {
 
     pub fn scroll(&mut self) {
@@ -62,7 +111,7 @@ impl<'a> Console<'a> {
 
         self.display.rect(x, y, 8, 16, self.background);
 
-        self.display.update_region(self.cursor_x, self.cursor_y, 8, 16)
+        self.display.update_region(x, y, 8, 16)
     }
 
     pub fn write_char(&mut self, c: char) {

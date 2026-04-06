@@ -1,5 +1,6 @@
 use crate::display::Display;
 use crate::PANIC_DISPLAY;
+use crate::keyboard::keyboard_handler;
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
 pub struct IdtEntry {
@@ -90,7 +91,7 @@ impl Idt {
         self.set_handles(13, general_protection_fault as u64);
         self.set_handles(14, page_fault as u64);
         self.set_handles(32, timer_handler as u64);
-        self.set_handles(33, keyboard_fault as u64);
+        self.set_handles(33, keyboard_handler as u64);
     }
 
     pub fn set_handles(&mut self, index: u8, handler: u64) {

@@ -12,11 +12,70 @@ use uefi::prelude::*;
 use uefi::{Char16};
 use uefi::proto::console::gop::GraphicsOutput;
 use uefi::table::boot::MemoryType;
-use core::fmt::Write;
+use core::fmt::{write, Write};
 use uefi::proto::console::text::{Key, ScanCode};
 use display::{Display};
 use console::{Console, TextGrid};
-use interrupts::{kernel_panic, Idtr, Idt, IdtEntry};
+use interrupts::{kernel_panic, Idtr, Idt, IdtEntry, inb, outb};
+use keyboard::{ scancode_to_char, KBD_BUFFER, KeyboardBuffer };
+use crate::keyboard::KBD_STATE;
+
+pub unsafe fn remap_pic() {
+    // Порты Master PIC
+    let master_command = 0x20;
+    let master_data = 0x21;
+    // Порты Slave PIC
+    let slave_command = 0xA0;
+    let slave_data = 0xA1;
+
+    // Сохраняем текущие маски (необязательно, но полезно)
+    let m1 = inb(master_data);
+    let m2 = inb(slave_data);
+
+    // 1. Начинаем инициализацию (ICW1)
+    // 0x11 говорит PIC, что будет еще 3 байта настроек
+    outb(master_command, 0x11);
+    io_wait(); // Небольшая задержка для старого железа
+    outb(slave_command, 0x11);
+    io_wait();
+
+    // 2. Устанавливаем смещение (ICW2)
+    // Теперь Master IRQ 0-7 станут векторами 32-39 (0x20)
+    outb(master_data, 0x20);
+    io_wait();
+    // Slave IRQ 8-15 станут векторами 40-47 (0x28)
+    outb(slave_data, 0x28);
+    io_wait();
+
+    // 3. Соединяем контроллеры (ICW3)
+    // Master говорит, что Slave подключен к IRQ 2
+    outb(master_data, 0x04);
+    io_wait();
+    // Slave говорит свой идентификатор (2)
+    outb(slave_data, 0x02);
+    io_wait();
+
+    // 4. Устанавливаем режим работы (ICW4)
+    // 0x01 — это режим 8086 (самый обычный для нас)
+    outb(master_data, 0x01);
+    io_wait();
+    outb(slave_data, 0x01);
+    io_wait();
+
+    // 5. Устанавливаем маски (OCW1)
+    // 0x00 — разрешить ВСЕ прерывания.
+    // Если хочешь только клаву и таймер, ставь 0xFC (11111100)
+    outb(master_data, 0x00);
+    outb(slave_data, 0x00);
+}
+
+// Вспомогательная функция задержки
+fn io_wait() {
+    unsafe {
+        // Пишем в неиспользуемый порт 0x80 (стандарт для задержек)
+        outb(0x80, 0);
+    }
+}
 
 pub static mut PANIC_DISPLAY: Option<Display> = None;
 
@@ -59,6 +118,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
 
     let bs = st.boot_services();
 
+
     let mmap = bs.memory_map(MemoryType::LOADER_DATA).unwrap();
 
     let mut memory_size: u64 = 0;
@@ -80,6 +140,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
         height: resolution.1,
         stride: stride,
     };
+
     let error_display = Display {
         ptr: ptr,
         back_ptr: back_ptr,
@@ -94,14 +155,11 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     
     unsafe {
         MY_IDT.init();
-        display.rect(0, 0, 100, 100, 0xFF0000);
 
         unsafe {
-            core::arch::asm!("cli"); // Вырубаем всё
+            core::arch::asm!("sti");
             load_idt(&MY_IDT);
         }
-        load_idt(&MY_IDT);
-        display.rect(100, 0, 100, 100, 0x00FF00);
     }
 
 
@@ -123,15 +181,26 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     };
 
 
-
     memory_size /= 2_u64.pow(20);
     display.rect(0, 0, display.width, display.height, 0x00000000);
+    display.update();
     let space_key = Char16::try_from('\r').unwrap();
     let backspace_key = Char16::try_from('\u{8}').unwrap();
 
-    for i in 0..200 {
-        write!(&mut console, "Scrolling line {}\n", i).unwrap();
+
+
+    unsafe { let (st, _mmap) = st.exit_boot_services(MemoryType::LOADER_DATA); }
+
+
+    unsafe {
+        MY_IDT.init();
+        load_idt(&MY_IDT);
+        remap_pic();
+        outb(0x21, 0xFC);
+        core::arch::asm!("sti");
     }
+
+
     
 
     loop {
@@ -139,42 +208,37 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
         let line_heights = console.line_lengths;
 
 
-        let key_event = st
-            .stdin()
-            .wait_for_key_event()
-            .expect("Keyboard event not available");
-
-        st.boot_services()
-            .wait_for_event(&mut [key_event])
-            .discard_errdata();
-
 
         display.rect(200, 0, 100, 100, 0x0000FF);
 
-        if let Some(key_event) = st.stdin().read_key().unwrap() {
-            match key_event {
-                Key::Printable(key) if key == space_key => {
-                    console.write_char('\n');
+
+        KBD_BUFFER.lock();
+        let buf = unsafe {&mut *KBD_BUFFER.buf.get()};
+        let char = buf.get_char();
+        KBD_BUFFER.unlock();
+        
+
+
+        if let Some(c) = char {
+            if c == '\u{8}' {
+                console.backspace();
+            } else {
+                KBD_STATE.lock();
+                let state = unsafe {&mut *KBD_STATE.buf.get()};
+
+                if state.shift || state.caps {
+                    console.write_char(c);
                 }
-
-                Key::Printable(key) if key == backspace_key => {
-                    console.backspace();
+                else {
+                    console.write_char(c.to_ascii_lowercase())
                 }
-
-                Key::Printable(c) => {
-                    let ch: char = c.into();
-                    console.write_char(ch);
-                }
-
-                Key::Special(ScanCode::ESCAPE) => {
-                    break;
-                }
-
-
-                _ => {}
+                KBD_STATE.unlock();
             }
         }
+
+        core::hint::spin_loop();
     }
+
     Status::SUCCESS
 
 }
@@ -185,5 +249,6 @@ const FONT: &[u8] = include_bytes!("IBM_VGA_8x16.bin");
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    kernel_panic("Panic");
     loop {}
 }
