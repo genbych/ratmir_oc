@@ -1,6 +1,9 @@
+
 use core::fmt;
 use crate::display::{get_char_data, Display};
 use crate::interrupts::kernel_panic;
+use crate::keyboard::{Spinlock, KBD_BUFFER};
+use crate::PANIC_DISPLAY;
 
 pub struct TextGrid {
     pub rows: usize,
@@ -17,36 +20,53 @@ pub struct Console<'a> {
     pub background: u32,
 }
 pub struct Stack<T, const N: usize> {
-    data: [T; N],
+    data: [Option<T>; N],
     top: usize,
 }
 
 #[derive(Copy, Clone)]
 pub struct Buffer<const N: usize> {
-    data: [Option<char>; N],
+    pub data: [u8; N],
+    pub cursor: usize,
 }
 
 impl<const N: usize> Buffer<N> {
     pub const fn new() -> Self {
-        Self { data: [None; N] }
+        Self { data: [0u8; N], cursor: 0 }
     }
+
+    pub fn clear(&mut self) {
+        self.data.fill(0u8);
+        self.cursor = 0;
+    }
+    pub fn push(&mut self, ch: u8) {
+        self.data[self.cursor] = ch;
+        self.cursor += 1;
+    }
+
+    pub fn pop(&mut self) -> Option<u8> {
+        if self.cursor > 0 {
+            self.data[self.cursor] = 0u8;
+            self.cursor -= 1;
+        }
+        Some(self.data[self.cursor])
+    }
+
+
 }
 
-pub static BUFFER: Buffer::<256> = Buffer::<256>::new();
-pub static STACK: Stack::<Buffer<256>, 256> = Stack {
-    data: [BUFFER; 256],
+pub static BUFFER: Spinlock<Buffer::<256>> =  Spinlock::new( Buffer::<256>::new() );
+pub static STACK: Spinlock<Stack::<Buffer<256>, 256>> = Spinlock::new(Stack {
+    data: [const { Some(Buffer::<256>::new()) }; 256],
     top: 0,
-};
+});
 
 
-impl<T: Copy + Default, const N: usize> Stack<T, N> {
-    pub fn new() -> Stack<T, N> {
-        Self { data: [T::default(); N], top: 0 }
-    }
+impl<T, const N: usize> Stack<T, N> {
 
     pub fn push(&mut self, data: T) {
         if self.top < N {
-            self.data[self.top] = data;
+            self.data[self.top] = Some(data);
             self.top += 1;
         }
         else {
@@ -56,7 +76,7 @@ impl<T: Copy + Default, const N: usize> Stack<T, N> {
     pub fn pop(&mut self) -> Option<T> {
         if self.top > 0 {
             self.top -= 1;
-            Some(self.data[self.top])
+            self.data[self.top].take()
         }
         else {
             None
@@ -67,6 +87,18 @@ impl<T: Copy + Default, const N: usize> Stack<T, N> {
 impl<'a> Console<'a> {
 
     pub fn scroll(&mut self) {
+
+        STACK.lock();
+        BUFFER.lock();
+        let mut buf = unsafe { *BUFFER.buf.get() };
+        let st = unsafe { &mut *STACK.buf.get() };
+
+        st.push(buf);
+        buf.clear();
+
+        STACK.unlock();
+        BUFFER.unlock();
+
 
         unsafe {
             let bytes_per_pixel = 4;
@@ -97,10 +129,23 @@ impl<'a> Console<'a> {
     pub fn backspace(&mut self) {
         if self.cursor_x > 0 {
             self.cursor_x -= 1;
+            BUFFER.lock();
+            let mut buf = unsafe { *BUFFER.buf.get() };
+
+            buf.pop();
+
+            BUFFER.unlock();
         }
         else if self.cursor_y > 0 {
             self.cursor_y -= 1;
             self.cursor_x = self.line_lengths[self.cursor_y];
+
+            BUFFER.lock();
+
+            let mut buf = unsafe { *BUFFER.buf.get() };
+            buf.pop();
+
+            BUFFER.unlock();
         }
         else {
             return;
@@ -114,7 +159,7 @@ impl<'a> Console<'a> {
         self.display.update_region(x, y, 8, 16)
     }
 
-    pub fn write_char(&mut self, c: char) {
+    pub fn write_char(&mut self, c: char, push: bool) {
 
         let mut skip = false;
 
@@ -135,7 +180,16 @@ impl<'a> Console<'a> {
         let start_y = self.cursor_y * 16;
 
 
-        if !skip {
+        if !skip{
+            if push {
+                BUFFER.lock();
+                let buf = unsafe {&mut *BUFFER.buf.get()};
+
+                buf.push(c as u8);
+
+                BUFFER.unlock();
+            }
+
             for row in 0..char.len() {
                 let row_data = char[row];
 
@@ -167,12 +221,29 @@ impl<'a> Console<'a> {
         self.display.update_region(start_x, start_y, 8, 16);
 
     }
+    pub fn command_handler(&self, buf: &'a [u8; 256]) -> (Option<&'a str>, core::str::SplitWhitespace<'a>)  {
+
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+
+
+        let clean_buf = &buf[..len];
+
+        let s = core::str::from_utf8(clean_buf).unwrap_or("");
+
+        let mut words = s.split_whitespace();
+        let command = words.next();
+        let args = words;
+
+
+        (command, args)
+
+    }
 }
 
 impl<'a> fmt::Write for Console<'a> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for c in s.chars() {
-            self.write_char(c);
+            self.write_char(c, false);
         }
         Ok(())
     }

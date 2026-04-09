@@ -15,7 +15,7 @@ use uefi::table::boot::MemoryType;
 use core::fmt::{write, Write};
 use uefi::proto::console::text::{Key, ScanCode};
 use display::{Display};
-use console::{Console, TextGrid};
+use console::{Console, TextGrid, BUFFER};
 use interrupts::{kernel_panic, Idtr, Idt, IdtEntry, inb, outb};
 use keyboard::{ scancode_to_char, KBD_BUFFER, KeyboardBuffer };
 use crate::keyboard::KBD_STATE;
@@ -69,10 +69,10 @@ pub unsafe fn remap_pic() {
     outb(slave_data, 0x00);
 }
 
-// Вспомогательная функция задержки
+
 fn io_wait() {
     unsafe {
-        // Пишем в неиспользуемый порт 0x80 (стандарт для задержек)
+
         outb(0x80, 0);
     }
 }
@@ -200,9 +200,6 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
         core::arch::asm!("sti");
     }
 
-
-    
-
     loop {
 
         let line_heights = console.line_lengths;
@@ -222,15 +219,32 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
         if let Some(c) = char {
             if c == '\u{8}' {
                 console.backspace();
-            } else {
+            }
+            else if c == '\n' {
+                BUFFER.lock();
+                let buf = unsafe {&mut *BUFFER.buf.get()};
+                BUFFER.unlock();
+                let (command, args) = console.command_handler(&buf.data);
+
+                console.write_char('\n', false);
+
+                if let Some(cmd) = command {
+                    match cmd {
+                        "echo" => { for arg in args { write!(&mut console, "{} \n", arg).unwrap(); } }
+                        "help" => { write!(&mut console, "This is the help menu \n").unwrap(); }
+                        _ => { write!(&mut console, "Unknown command {} \n", cmd).unwrap(); }
+                    }
+                }
+            }
+            else {
                 KBD_STATE.lock();
                 let state = unsafe {&mut *KBD_STATE.buf.get()};
 
                 if state.shift || state.caps {
-                    console.write_char(c);
+                    console.write_char(c, true);
                 }
                 else {
-                    console.write_char(c.to_ascii_lowercase())
+                    console.write_char(c.to_ascii_lowercase(), true)
                 }
                 KBD_STATE.unlock();
             }

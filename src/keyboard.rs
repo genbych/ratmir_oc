@@ -3,14 +3,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use uefi::proto::console::text::Key::Printable;
 use crate::interrupts::{inb, kernel_panic, outb, InterruptStackFrame};
 
-
 pub struct Spinlock<T> {
     lock_: AtomicBool,
     pub buf: UnsafeCell<T>,
 }
 
 impl<T> Spinlock<T> {
-    const fn new(data: T) -> Self {
+    pub const fn new(data: T) -> Self {
         Self {
             lock_: AtomicBool::new(false),
             buf: UnsafeCell::new(data),
