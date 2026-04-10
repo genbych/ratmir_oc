@@ -22,6 +22,7 @@ pub struct Console<'a> {
 pub struct Stack<T, const N: usize> {
     data: [Option<T>; N],
     top: usize,
+    view_index: usize,
 }
 
 #[derive(Copy, Clone)]
@@ -59,26 +60,38 @@ pub static BUFFER: Spinlock<Buffer::<256>> =  Spinlock::new( Buffer::<256>::new(
 pub static STACK: Spinlock<Stack::<Buffer<256>, 256>> = Spinlock::new(Stack {
     data: [const { Some(Buffer::<256>::new()) }; 256],
     top: 0,
+    view_index: 0,
 });
 
 
-impl<T, const N: usize> Stack<T, N> {
+impl<T: Copy, const N: usize> Stack<T, N> {
 
     pub fn push(&mut self, data: T) {
         if self.top < N {
             self.data[self.top] = Some(data);
             self.top += 1;
+            self.view_index = self.top;
         }
         else {
             kernel_panic("Stack Overflow");
         }
     }
     pub fn pop(&mut self) -> Option<T> {
-        if self.top > 0 {
-            self.top -= 1;
-            self.data[self.top].take()
+        if self.view_index > 0 {
+            self.view_index -= 1;
+            self.data[self.view_index]
+
         }
         else {
+            None
+        }
+    }
+    pub fn next(&mut self) -> Option<T> {
+        if self.view_index + 1 < self.top {
+            self.view_index += 1;
+            self.data[self.view_index]
+        } else {
+            self.view_index = self.top;
             None
         }
     }
@@ -87,17 +100,6 @@ impl<T, const N: usize> Stack<T, N> {
 impl<'a> Console<'a> {
 
     pub fn scroll(&mut self) {
-
-        STACK.lock();
-        BUFFER.lock();
-        let mut buf = unsafe { *BUFFER.buf.get() };
-        let st = unsafe { &mut *STACK.buf.get() };
-
-        st.push(buf);
-        buf.clear();
-
-        STACK.unlock();
-        BUFFER.unlock();
 
 
         unsafe {
@@ -129,27 +131,22 @@ impl<'a> Console<'a> {
     pub fn backspace(&mut self) {
         if self.cursor_x > 0 {
             self.cursor_x -= 1;
-            BUFFER.lock();
-            let mut buf = unsafe { *BUFFER.buf.get() };
-
-            buf.pop();
-
-            BUFFER.unlock();
         }
         else if self.cursor_y > 0 {
             self.cursor_y -= 1;
             self.cursor_x = self.line_lengths[self.cursor_y];
 
-            BUFFER.lock();
-
-            let mut buf = unsafe { *BUFFER.buf.get() };
-            buf.pop();
-
-            BUFFER.unlock();
         }
         else {
             return;
         }
+
+        BUFFER.lock();
+
+        let mut buf = unsafe {&mut  *BUFFER.buf.get() };
+        buf.pop();
+
+        BUFFER.unlock();
 
         let x = self.cursor_x * 8;
         let y = self.cursor_y * 16;

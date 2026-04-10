@@ -15,7 +15,7 @@ use uefi::table::boot::MemoryType;
 use core::fmt::{write, Write};
 use uefi::proto::console::text::{Key, ScanCode};
 use display::{Display};
-use console::{Console, TextGrid, BUFFER};
+use console::{Console, TextGrid, BUFFER, STACK};
 use interrupts::{kernel_panic, Idtr, Idt, IdtEntry, inb, outb};
 use keyboard::{ scancode_to_char, KBD_BUFFER, KeyboardBuffer };
 use crate::keyboard::KBD_STATE;
@@ -228,14 +228,28 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
 
                 console.write_char('\n', false);
 
+
                 if let Some(cmd) = command {
                     match cmd {
-                        "echo" => { for arg in args { write!(&mut console, "{} \n", arg).unwrap(); } }
+                        "echo" => { for arg in args { write!(&mut console, "{} ", arg).unwrap(); } console.write_char('\n', false) }
                         "help" => { write!(&mut console, "This is the help menu \n").unwrap(); }
                         _ => { write!(&mut console, "Unknown command {} \n", cmd).unwrap(); }
                     }
                 }
+
+                STACK.lock();
+                BUFFER.lock();
+                let mut buf = unsafe { &mut *BUFFER.buf.get() };
+                let st = unsafe { &mut *STACK.buf.get() };
+
+                st.push(*buf);
+                buf.clear();
+
+                STACK.unlock();
+                BUFFER.unlock();
+
             }
+
             else {
                 KBD_STATE.lock();
                 let state = unsafe {&mut *KBD_STATE.buf.get()};
@@ -248,6 +262,64 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
                 }
                 KBD_STATE.unlock();
             }
+        }
+        else {
+            KBD_STATE.lock();
+            let state = unsafe {&mut *KBD_STATE.buf.get()};
+
+            if state.u_arr {
+                STACK.lock();
+                let old_buf = unsafe { &mut *STACK.buf.get() }.pop();
+                STACK.unlock();
+
+                if let Some(b) = old_buf {
+                    BUFFER.lock();
+                    unsafe { *BUFFER.buf.get() = b; }
+                    BUFFER.unlock();
+
+
+                    KBD_STATE.unlock();
+
+                    console.display.clear_line(console.cursor_y);
+                    let actual_len = b.cursor;
+                    let s = core::str::from_utf8(&b.data[..actual_len]).unwrap_or("");
+
+                    console.cursor_x = 0;
+                    write!(&mut console, "{}", s).unwrap();
+
+                    console.cursor_x = actual_len;
+
+                    continue;
+                }
+            }
+
+            else if state.d_arr {
+                STACK.lock();
+                let next_buf = unsafe { &mut *STACK.buf.get() }.next();
+                STACK.unlock();
+
+                if let Some(b) = next_buf {
+                    BUFFER.lock();
+                    unsafe { *BUFFER.buf.get() = b; }
+                    BUFFER.unlock();
+
+
+                    KBD_STATE.unlock();
+
+                    console.display.clear_line(console.cursor_y);
+                    let actual_len = b.cursor;
+                    let s = core::str::from_utf8(&b.data[..actual_len]).unwrap_or("");
+
+                    console.cursor_x = 0;
+                    write!(&mut console, "{}", s).unwrap();
+
+                    console.cursor_x = actual_len;
+
+                    continue;
+                }
+            }
+
+            KBD_STATE.unlock();
         }
 
         core::hint::spin_loop();

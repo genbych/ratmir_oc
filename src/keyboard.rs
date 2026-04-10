@@ -216,6 +216,8 @@ fn extended_handler(scancode: Option<u8>) -> Option<char> {
             0x50 => { state.d_arr = true; }
             0x4B => { state.l_arr = true; }
             0x4D => { state.r_arr = true; }
+            0xC8 => { state.u_arr = false; }
+            0xD0 => {state.d_arr = false; }
             _ => {}
         }
     }
