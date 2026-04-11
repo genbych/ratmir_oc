@@ -1,4 +1,5 @@
 use crate::FONT;
+use crate::BUFFER;
 
 pub struct Display {
     pub ptr: *mut u32,
@@ -61,8 +62,10 @@ impl Display {
             let line_ptr = self.back_ptr.add(offset);
 
             let count = self.stride * 16;
+            
 
             core::ptr::write_bytes(line_ptr, 0, count);
+            self.update()
         }
     }
 

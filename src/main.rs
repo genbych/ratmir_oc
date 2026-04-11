@@ -6,6 +6,7 @@ mod display;
 mod console;
 mod interrupts;
 mod keyboard;
+mod memory;
 
 use core::panic::PanicInfo;
 use uefi::prelude::*;
@@ -18,7 +19,8 @@ use display::{Display};
 use console::{Console, TextGrid, BUFFER, STACK};
 use interrupts::{kernel_panic, Idtr, Idt, IdtEntry, inb, outb};
 use keyboard::{ scancode_to_char, KBD_BUFFER, KeyboardBuffer };
-use crate::keyboard::KBD_STATE;
+use crate::keyboard::{Spinlock, KBD_STATE};
+use memory::{ BitmapAllocator, ALLOCATOR };
 
 pub unsafe fn remap_pic() {
     // Порты Master PIC
@@ -121,13 +123,12 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
 
     let mmap = bs.memory_map(MemoryType::LOADER_DATA).unwrap();
 
-    let mut memory_size: u64 = 0;
+    ALLOCATOR.lock();
+    let mut allocator = unsafe {&mut *ALLOCATOR.buf.get() };
+    *allocator = Some(BitmapAllocator::new(mmap));
 
-    for descriptor in mmap.entries() {
-        if descriptor.ty == MemoryType::CONVENTIONAL {
-            memory_size += descriptor.page_count * 4096;
-        }
-    }
+    ALLOCATOR.unlock();
+
 
     let back_ptr = bs.allocate_pool(MemoryType::LOADER_DATA, stride * resolution.1 * 4).unwrap().as_ptr() as *mut u32;
 
@@ -181,12 +182,19 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     };
 
 
-    memory_size /= 2_u64.pow(20);
     display.rect(0, 0, display.width, display.height, 0x00000000);
     display.update();
     let space_key = Char16::try_from('\r').unwrap();
     let backspace_key = Char16::try_from('\u{8}').unwrap();
 
+    ALLOCATOR.lock();
+    let mut allocator = unsafe {&mut *ALLOCATOR.buf.get() };
+
+    write!(&mut console, "Allocated addr: 0x{:x} \n", allocator.as_mut().unwrap().alloc()).unwrap();
+    write!(&mut console, "Allocated addr: 0x{:x} \n", allocator.as_mut().unwrap().alloc()).unwrap();
+    write!(&mut console, "Allocated addr: 0x{:x} \n", allocator.as_mut().unwrap().alloc()).unwrap();
+
+    ALLOCATOR.unlock();
 
 
     unsafe { let (st, _mmap) = st.exit_boot_services(MemoryType::LOADER_DATA); }
@@ -206,7 +214,6 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
 
 
 
-        display.rect(200, 0, 100, 100, 0x0000FF);
 
 
         KBD_BUFFER.lock();
@@ -277,6 +284,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
                     unsafe { *BUFFER.buf.get() = b; }
                     BUFFER.unlock();
 
+                    state.u_arr = false;
 
                     KBD_STATE.unlock();
 
@@ -291,6 +299,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
 
                     continue;
                 }
+
             }
 
             else if state.d_arr {
@@ -303,6 +312,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
                     unsafe { *BUFFER.buf.get() = b; }
                     BUFFER.unlock();
 
+                    state.d_arr = false;
 
                     KBD_STATE.unlock();
 
@@ -314,6 +324,7 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
                     write!(&mut console, "{}", s).unwrap();
 
                     console.cursor_x = actual_len;
+
 
                     continue;
                 }
