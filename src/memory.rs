@@ -7,11 +7,90 @@ pub struct BitmapAllocator {
     pub total_pages: usize,
     pub last_found_idx: usize,
 }
+pub struct PageTable {
+    data: [PageTableEntry; 512],
+}
+
+#[derive(Copy, Clone)]
+pub struct PageTableEntry {
+    addr: u64,
+}
+
+pub struct VirtAddr {
+    addr: u64,
+}
+
+enum Flags {
+    PRESENT = 1 << 0,
+    WRITABLE = 1 << 1,
+    USER = 1 << 2,
+}
 
 unsafe impl Send for BitmapAllocator {}
 unsafe impl Sync for BitmapAllocator {}
 pub static ALLOCATOR: Spinlock<Option<BitmapAllocator>> = Spinlock::new(None);
 
+
+impl VirtAddr {
+    pub fn new(addr: u64) -> Self {
+        Self { addr: addr }
+    }
+
+    pub fn pml4_index(&self) -> u64 {
+        let mask = 0x1FF;
+        let mut addr = self.addr;
+
+        addr = addr >> 39;
+
+        addr & mask
+    }
+    pub fn pml3_index(&self) -> u64 {
+        let mask = 0x1FF;
+        let mut addr = self.addr;
+
+        addr = addr >> 30;
+
+        addr & mask
+    }
+    pub fn pml2_index(&self) -> u64 {
+        let mask = 0x1FF;
+        let mut addr = self.addr;
+
+        addr = addr >> 21;
+
+        addr & mask
+    }
+    pub fn pml1_index(&self) -> u64 {
+        let mask = 0x1FF;
+        let mut addr = self.addr;
+
+        addr = addr >> 12;
+
+        addr & mask
+    }
+}
+
+impl PageTable {
+    pub fn new() -> Self {
+        Self {data: [PageTableEntry { addr: 0 }; 512]}
+    }
+
+    pub fn clear(&mut self) {
+        self.data = [PageTableEntry { addr: 0 }; 512];
+    }
+}
+
+impl PageTableEntry {
+    pub fn set_addr(&mut self, addr: u64, flags: u64) {
+        let mask = 0x000F_FFFF_FFFF_F000;
+
+        self.addr = addr & mask;
+        let flags = flags & !mask;
+
+        self.addr |= flags;
+    }
+
+}
 impl BitmapAllocator {
     pub fn new(mmap: uefi::table::boot::MemoryMap) -> Self {
         let mut page_count = 0;
@@ -105,5 +184,39 @@ impl BitmapAllocator {
             }
         }
         0u64
+    }
+}
+
+pub fn map_page(virt: &mut VirtAddr, phys: u64, flags: Flags, plm4: *mut PageTable) {
+    let levels = [virt.pml4_index(), virt.pml3_index(), virt.pml2_index(), virt.pml1_index()];
+    let mut current_table = plm4;
+
+    for level in levels {
+        let entry = unsafe { &mut (*plm4).data[level as usize] };
+
+        if level == virt.pml1_index() {
+            entry.set_addr(phys, &flags);
+            return;
+        }
+
+        if (entry.addr & (Flags::PRESENT as u64)) == 0 {
+            ALLOCATOR.lock();
+
+            let alloc = unsafe {&mut *ALLOCATOR.buf.get() };
+            let addr =alloc.as_mut().unwrap().alloc();
+
+            ALLOCATOR.unlock();
+
+            let ptr = addr as *mut PageTable;
+
+            unsafe {
+                (*ptr).clear();
+            }
+
+            entry.set_addr(addr, Flags::PRESENT | Flags::WRITABLE);
+
+            current_table = entry.addr as *mut PageTable;
+    }
+
     }
 }
