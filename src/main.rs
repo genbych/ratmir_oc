@@ -1,12 +1,14 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+extern crate alloc;
 
 mod display;
 mod console;
 mod interrupts;
 mod keyboard;
 mod memory;
+mod heap;
 
 use core::panic::PanicInfo;
 use uefi::prelude::*;
@@ -20,7 +22,11 @@ use console::{Console, TextGrid, BUFFER, STACK};
 use interrupts::{kernel_panic, Idtr, Idt, IdtEntry, inb, outb};
 use keyboard::{ scancode_to_char, KBD_BUFFER, KeyboardBuffer };
 use crate::keyboard::{Spinlock, KBD_STATE};
-use memory::{ BitmapAllocator, ALLOCATOR };
+use memory::{ BitmapAllocator, ALLOCATOR, map_page, PageTable, VirtAddr, Flags };
+use crate::heap::FixedSizeBlockAllocator;
+
+#[global_allocator]
+static HEAP_ALLOCATOR: Spinlock<FixedSizeBlockAllocator> = Spinlock::new(FixedSizeBlockAllocator::new());
 
 pub unsafe fn remap_pic() {
     // Порты Master PIC
@@ -182,8 +188,85 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     };
 
 
+    ALLOCATOR.lock();
+    let alloc = unsafe {&mut *ALLOCATOR.buf.get()};
+    let pml4_addr = alloc.as_mut().unwrap().alloc();
+    let pml4 = pml4_addr as *mut PageTable;
+    unsafe { (*pml4).clear(); }
+
+    ALLOCATOR.unlock();
+
+    let phys_addr = 0x50000;
+    let virt_addr_new = 0x1234_5678_9000;
+
+    unsafe {
+        map_page(&mut VirtAddr::new(0x50000), phys_addr, Flags::PRESENT | Flags::WRITABLE, pml4);
+        map_page(&mut VirtAddr::new(virt_addr_new), phys_addr, Flags::PRESENT | Flags::WRITABLE, pml4);
+
+        for addr in (0..0x1_0000_0000).step_by(0x1000) {
+            map_page(&mut VirtAddr::new(addr), addr, Flags::PRESENT | Flags::WRITABLE, pml4);
+        }
+    }
+
+    unsafe {
+        core::arch::asm!(
+        "mov cr3, {}",
+        in(reg) pml4_addr,
+        options(nostack, preserves_flags)
+        );
+    }
+
+
     display.rect(0, 0, display.width, display.height, 0x00000000);
     display.update();
+
+
+
+
+    let heap_start = 0xFFFF_9000_0000_0000;
+    let heap_size = 1024 * 1024;
+
+    for addr in (heap_start..heap_start + heap_size).step_by(4096) {
+        let mut v = VirtAddr::new(addr);
+
+        ALLOCATOR.lock();
+
+        let alloc = unsafe {&mut *ALLOCATOR.buf.get()};
+
+        let phys = alloc.as_mut().unwrap().alloc();
+
+        ALLOCATOR.unlock();
+
+        unsafe {
+            map_page(&mut v, phys, Flags::PRESENT | Flags::WRITABLE, pml4);
+        }
+    }
+
+    unsafe {
+        HEAP_ALLOCATOR.lock();
+
+        let alloc = unsafe {&mut *HEAP_ALLOCATOR.buf.get()};
+
+        alloc.fallback_allocator.init(heap_start as *mut u8, heap_size as usize);
+
+        HEAP_ALLOCATOR.unlock();
+    }
+
+
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+
+    let val = Box::new(1337);
+    let mut v = Vec::new();
+    v.push(*val);
+
+    if v[0] == 1337 {
+        write!(&mut console, "HEAP IS ALIVE! Box and Vec work. Next VAL: {}\n", v[0]);
+    }
+    else {
+        write!(&mut console, "HEAP IS NOT ALIVE! Box and Vec work. Value: {} \n", v[0]);
+    }
+
     let space_key = Char16::try_from('\r').unwrap();
     let backspace_key = Char16::try_from('\u{8}').unwrap();
 
@@ -211,10 +294,6 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     loop {
 
         let line_heights = console.line_lengths;
-
-
-
-
 
         KBD_BUFFER.lock();
         let buf = unsafe {&mut *KBD_BUFFER.buf.get()};
@@ -339,6 +418,8 @@ fn main(handle: Handle, mut st: SystemTable<Boot>) -> Status {
     Status::SUCCESS
 
 }
+
+
 
 
 const FONT: &[u8] = include_bytes!("IBM_VGA_8x16.bin");

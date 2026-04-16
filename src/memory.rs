@@ -20,10 +20,12 @@ pub struct VirtAddr {
     addr: u64,
 }
 
-enum Flags {
-    PRESENT = 1 << 0,
-    WRITABLE = 1 << 1,
-    USER = 1 << 2,
+pub struct Flags;
+
+impl Flags {
+    pub const PRESENT: u64 = 1 << 0;
+    pub const WRITABLE: u64 = 1 << 1;
+    pub const USER: u64 = 1 << 2;
 }
 
 unsafe impl Send for BitmapAllocator {}
@@ -88,6 +90,11 @@ impl PageTableEntry {
         let flags = flags & !mask;
 
         self.addr |= flags;
+    }
+    pub fn get_addr(&self) -> u64 {
+        let mask = 0x000F_FFFF_FFFF_F000;
+
+        self.addr & mask
     }
 
 }
@@ -187,15 +194,15 @@ impl BitmapAllocator {
     }
 }
 
-pub fn map_page(virt: &mut VirtAddr, phys: u64, flags: Flags, plm4: *mut PageTable) {
+pub fn map_page(virt: &mut VirtAddr, phys: u64, flags: u64, plm4: *mut PageTable) {
     let levels = [virt.pml4_index(), virt.pml3_index(), virt.pml2_index(), virt.pml1_index()];
     let mut current_table = plm4;
 
-    for level in levels {
-        let entry = unsafe { &mut (*plm4).data[level as usize] };
+    for (i, &level) in levels.iter().enumerate() {
+        let entry = unsafe { &mut (*current_table).data[level as usize] };
 
-        if level == virt.pml1_index() {
-            entry.set_addr(phys, &flags);
+        if i == 3 {
+            entry.set_addr(phys, flags);
             return;
         }
 
@@ -213,10 +220,11 @@ pub fn map_page(virt: &mut VirtAddr, phys: u64, flags: Flags, plm4: *mut PageTab
                 (*ptr).clear();
             }
 
-            entry.set_addr(addr, Flags::PRESENT | Flags::WRITABLE);
+            entry.set_addr(addr, (Flags::PRESENT as u64) | (Flags::WRITABLE as u64));
 
-            current_table = entry.addr as *mut PageTable;
-    }
+        }
+
+        current_table = entry.get_addr() as *mut PageTable;
 
     }
 }
